@@ -528,7 +528,7 @@ and compile_block lab_fin rbp_offset env (var_decls, instrs) =
 	) (new_offset, nop) instrs
 	
 (* Transforme une déclaration en langage assembleur *)
-let compile_decl (atext, adata) d =
+let rec compile_decl (atext, adata) d =
 	match d with
 	| Dtype _ ->
 		atext, adata
@@ -556,6 +556,10 @@ let compile_decl (atext, adata) d =
 		(* max_rbp_offset est négatif (multiple de -8) *)
 		let code =
 			glabel f.node ++
+			(if f.node = "main" then 
+				init ()
+			else
+				nop) ++
 			comment("On rentre dans la fonction " ^ f.node) ++
 			pushq ~%rbp ++
 			mov ~%rsp ~%rbp ++
@@ -577,7 +581,7 @@ let compile_decl (atext, adata) d =
 			atext ++ code, adata
 	
 (* Transforme un programme en langage assembleur *)
-let compile_prog p =
+and compile_prog p =
 	let text, data =
 		List.fold_left compile_decl (nop, nop) p
 	in
@@ -594,6 +598,112 @@ let compile_prog p =
 	) double_env data
 	in
 	{
-		text = text;
-		data = data
+		text = 
+			(compile_malloc ()) ++ 
+			(compile_free ()) ++ 
+			text;
+		data = data ++ (system_vars ())
 	}
+	
+and system_vars () = inline "
+first_mem:
+	.long 0
+last_mem:
+	.long 0
+"
+
+and init () = 
+	comment("Debut initialisation : ") ++
+	
+	movq ~$12 ~%rax ++ (* 12 : Appelle systeme brk *)
+	movq ~$0 ~%rdi ++ (* 0 : Pour récupérer la position du segment *)
+	inline "	syscall\n" ++ (* Excecute le syscall *)
+	inline "	mov %rax, first_mem\n" ++(* Sauvegarde le pointeur *)
+	inline "	mov %rax, last_mem\n" ++(* Sauvegarde le pointeur *)
+	
+	comment("Fin initialisation : ")
+
+and compile_malloc () = 
+	glabel "malloc" ++
+	comment("On rentre dans la fonction malloc") ++
+	(* La taille est dans le registre ~%rdi *)
+	imulq ~$8 ~%rdi ++ (* Conversion des bits en octets *)
+	addq ~$32 ~%rdi ++ (* Ajout de l'entête *)
+	(* Multiple de 8 octets : (((n/64)+1)*64) *)
+	movq ~%rdi ~%rax ++
+	xor ~%rdx ~%rdx++
+	movq ~$64 ~%r10 ++
+	cqto ++ divq ~%r10 ++
+	movq ~%rax ~%r10 ++
+	
+	addq ~$1 ~%r10 ++
+	imulq ~$64 ~%r10 ++
+
+	inline "	mov first_mem, %r11\n" ++ (* Recupere le premier pointeur *)
+	inline "	mov last_mem, %r12\n" ++ (* Recupere le dernier pointeur *)
+	
+	glabel "malloc_recherche" ++
+
+	(* Recherche de mémoire vide :
+		r10 => Taille du nouveau registre
+		r11 => Le pointeur du bloc
+		r12 => Le pointeur max
+		
+		Tant que pointeur est inférieur a last_mem
+			Si le statut est libre
+				Si taille est égale
+					changer le statut
+					retourner le pointeur
+				Sinon si taille supérieur
+					Diviser le bloc en 2
+					retourner le pointeur du première bloc
+				Sinon
+					pointeur = pointeur + 32 + taille
+			Sinon 
+				pointeur + 32 + taille
+	*)
+	
+	(*cmpq ~%r11 ~%r12++
+	setb ~%r11b ++
+	movzbl ~%r11b ~%r11d ++
+	test ~%r11 ~%r11 ++
+	jne "malloc_creation" ++
+	
+	jmp "malloc_recherche" ++*)
+	
+	
+	(* Augmentation de la mémoire *)
+	glabel "malloc_creation" ++
+	
+	inline "	mov last_mem, %rdi\n" ++(* Récupére la derniere position *)
+	pushq ~%r10 ++ (* Sauvegarde la taille avec l'entête et divisible par 8 *)
+	pushq ~%rdi ++ (* Sauvegarde le nouveau pointeur *)
+	
+	addq ~%r10 ~%rdi ++ (* Calcule la nouvelle fin du bloc *)
+	inline "	mov %rdi, last_mem\n" ++(* Actualise la derniere position *)
+	
+	movq ~$12 ~%rax ++ (* 12 : Appelle systeme brk *)
+	inline "	syscall\n" ++ (* Excecute le syscall *)
+	
+	popq ~%rax ++ (* Récupére le pointeur *)
+	popq ~%r10 ++ (* Récupére la taille *)
+	
+	subq ~$32 ~%r10 ++(* La taille sans l'entete*)
+	xorq ~$1 ~%r10 ++ (* Ajoute le statut *)
+	movq ~%r10 (addr ~%rax) ++ (* Sauvegarde l'entete *)
+	addq ~$32 ~%rax ++(* Ajoute à l'entete la taille du pointeur *)
+	
+	(* Le resultat doit être dans le registre ~%rax *)
+	ret
+and compile_free () = 
+	glabel "free" ++
+	comment("On rentre dans la fonction free") ++
+	(* La pointeur est dans le registre ~%rdi *)
+
+	subq ~$32 ~%rdi ++ (* Retire l'entete *)
+	
+	movq (addr ~%rdi) ~%r10 ++ (* Recupere l'entete *)
+	xorq ~$1 ~%r10 ++ (* On change le statut *)
+	movq ~%r10 (addr ~%rdi) ++ (* Sauvegarde l'entete *)
+	
+	ret
